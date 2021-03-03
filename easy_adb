@@ -1,0 +1,201 @@
+#!/bin/bash
+
+ADB_COMMAND="adb"
+KEY_BACK=4
+KEY_UP=19
+KEY_DOWN=20
+KEY_RIGHT=22
+KEY_ENTER=66
+KEY_TAB=61
+KEY_DEL=67
+KEY_MENU=82
+KEY_HIDE_KEYBOARD=111
+KEY_MOVE_END=123
+
+device=""
+package=""
+
+log_msg() {
+	echo $1 >&2
+}
+
+log_msg_no_nl() {
+	printf $1 >&2
+}
+
+execute_adb() {
+	if [ "$device" != "" ]
+	then
+		$ADB_COMMAND -s $device $1
+	else
+		$ADB_COMMAND $1
+	fi
+}
+
+set_package() {
+	package=$1
+}
+
+adb_shell() {
+	execute_adb "shell $1"
+}
+
+use_device() {
+	device=$1
+	log_msg "Using device $1"
+}
+
+keyevent() {
+	local key=$1
+	local times=$2
+
+	if [ "$times" != "" ] && [ $times -gt 1 ]
+	then
+		for count in $(seq 2 $times)
+		do
+			key="$key $1"
+		done
+	fi
+
+	#log_msg "Sending keyevent $key"
+	adb_shell "input keyevent $key"
+}
+
+set_text() {
+	adb_shell "input text $1"
+}
+
+select_device() {
+	local device_num=$1
+        local devices=$($ADB_COMMAND devices -l | grep . |  grep -v 'List')
+        local num_devices=$(echo "$devices" | wc -l)
+
+        if [ $num_devices -gt 1 ]
+        then
+                if [ -v "$device_num" ] && ([ $device_num -gt $num_devices ] || [ $device_num -lt 1 ])
+                then
+                        log_msg "The device doesn't exist!"
+                        device_num=""
+		else
+			device=$device_num
+		fi
+		
+		if [ -z "$device_num" ] || [ -z "$device" ] || [ $device -gt $num_devices ] || [ $device -lt 1 ]		
+		then		
+			log_msg "Select the device to use:"		
+			local models=$(echo "$devices" | awk '{print $5}' | awk -F':' '{print $2}')			
+			readarray -t array_models <<< $(echo -e "${models}")
+
+			for index in "${!array_models[@]}"
+                        do
+				printf "\t%s: %s\n" "$(( $index + 1 ))" "${array_models[$index]}"
+                        done
+
+                        read device
+
+                        while [ $device -gt $num_devices ] || [ $device -lt 1 ]
+                        do
+                                log_msg "Invalid device!"
+                                read device
+                        done
+                fi
+
+                local id=$(echo "$devices" | awk "{if(NR==$device) print \$1}") 
+                use_device $id
+	fi
+}
+
+get_window_dump() {
+	echo $(execute_adb "exec-out uiautomator dump /dev/tty")
+}
+
+element_exists() {
+	log_msg "Looking for $1"
+
+	if [ $(get_window_dump | grep -c "$1") -gt 0 ]
+	then
+		echo true
+	else
+		echo false
+	fi
+}
+
+clear_input() {
+	keyevent $KEY_MOVE_END
+	del_events=$(printf "$KEY_DEL %.0s" {1..20})
+        keyevent "--longpress $del_events"
+}
+
+is_in_screen() {
+	log_msg "Looking for $1"
+	if [ $package == "" ]
+	then
+		log_msg "No package specified. Set it using set_package PACKAGE"
+		exit 3
+	else
+        	if [ $(adb_shell "dumpsys activity $package" | grep -Ec "$1") -gt 0 ]
+		then
+			log_msg "Found!"
+			echo true
+		else
+			echo false
+		fi
+	fi
+}
+
+is_activity_resumed() {
+	local activity=$1
+	
+	if [ $(adb_shell 'dumpsys activity activities' | grep -cE "$activity") -gt 0 ]
+	then
+		echo true
+	else
+		echo false
+	fi
+}
+
+open_app() {
+	local app=$1
+	log_msg "Oppening app $app"
+	adb_shell "am start -n $app" &>/dev/null
+}
+
+wait_for_screen() {
+	local screen=$1
+        log_msg_no_nl "Waiting for $screen"
+	local timeout=10
+	local counter=0
+
+	while [ ! $(is_in_screen $screen) ] && [ $counter -lt $timeout ]
+        do
+                sleep 1
+		counter=$(( counter + 1 ))
+		log_msg_no_nl "."
+	done
+
+	if [ $counter -eq 10 ]
+	then
+		log_msg "ERROR: Reached timeout!"
+		exit 1 
+	else
+		log_msg "done!"
+	fi
+}
+
+grant_permission() {
+	local permission=$1
+	log_msg "Granting permission $permission"
+	adb_shell "pm grant $package android.permission.$permission"	
+}
+
+tap_element() {
+        log_msg_no_nl "Tapping $1 "
+	readarray -t bounds <<< $(get_window_dump | grep -oP "$1.+?(?=\]\")" | grep -o 'bounds=.*' | grep -oP '\d*,\d*')
+        log_msg "$bounds"
+	x=$((${bounds[1]%,*} - 50))
+        y1=${bounds[0]##*,}
+        y2=${bounds[1]##*,}
+        y=$(( $(( $(( $y2 - $y1 )) / 2 )) + $y1 ))
+        log_msg "($x,$y)"
+        adb_shell "input tap $x $y"
+}
